@@ -10,6 +10,7 @@ API = "https://discord.com/api/v10"
 def req(path):
     r = urllib.request.Request(f"{API}{path}")
     r.add_header("Authorization", f"Bot {token}")
+    r.add_header("User-Agent", "DiscordDelayRelay (https://github.com/TuanAnh17N/apex-bot-delay-relay, 1.0)")
     try:
         with urllib.request.urlopen(r, timeout=15) as resp:
             return resp.status, json.loads(resp.read().decode())
