@@ -93,12 +93,25 @@ from zoneinfo import ZoneInfo
 
 BERLIN = ZoneInfo("Europe/Berlin")
 
-SESSIONS = [
-    ("Asia", 0, 7),
-    ("London", 7, 12),
-    ("New York", 12, 21),
-    ("Overnight", 21, 24),
+# Real trading-session boundaries, Europe/Berlin local time. Overnight wraps
+# midnight (23:00-02:00); a trade landing in the 23:00-00:00 "market closed"
+# gap folds into Overnight rather than raising.
+SESSION_ORDER = ["Tokyo", "London", "New York", "Overnight"]
+_SESSION_MINUTES = [
+    ("Tokyo", 2 * 60, 9 * 60),
+    ("London", 9 * 60, 15 * 60 + 30),
+    ("New York", 15 * 60 + 30, 23 * 60),
 ]
+
+
+def session_for_time(hour: int, minute: int) -> str:
+    total_minutes = hour * 60 + minute
+    if total_minutes >= 23 * 60 or total_minutes < 2 * 60:
+        return "Overnight"
+    for name, start, end in _SESSION_MINUTES:
+        if start <= total_minutes < end:
+            return name
+    raise ValueError(f"time {hour:02d}:{minute:02d} not in any session")
 
 GRADE_ORDER = ["A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-"]
 
@@ -107,13 +120,6 @@ TF_ORDER = ["30s", "1m", "2m", "3m", "5m", "15m"]
 
 def to_local(iso_ts: str) -> datetime:
     return datetime.fromisoformat(iso_ts).astimezone(BERLIN)
-
-
-def session_for_hour(hour: int) -> str:
-    for name, start, end in SESSIONS:
-        if start <= hour < end:
-            return name
-    raise ValueError(f"hour {hour} not in any session")
 
 
 def grade_sort_key(grade: str) -> tuple:
@@ -209,6 +215,7 @@ def build_weekly_report(trades: list[dict], week_start: datetime, week_end: date
 
     lines = [
         f"📈 Weekly Performance Stats — {week_start:%b %d} — {week_end:%b %d, %Y}",
+        "🕐 All times shown in German local time (CET/CEST)",
         "",
         f"⏱️ {total} trades",
         f"✅ Wins    {wins}   +{wins}.0R",
@@ -221,8 +228,8 @@ def build_weekly_report(trades: list[dict], week_start: datetime, week_end: date
         "",
         "🌐 By Session",
     ]
-    by_session = tally(trades, lambda t: session_for_hour(t["_local_entry"].hour))
-    session_names = [n for n, _, _ in SESSIONS]
+    by_session = tally(trades, lambda t: session_for_time(t["_local_entry"].hour, t["_local_entry"].minute))
+    session_names = SESSION_ORDER
     session_entries = [
         (name, by_session[name]) for name in session_names
         if name in by_session and (by_session[name]["win"] + by_session[name]["loss"]) > 0
@@ -240,7 +247,7 @@ def build_weekly_report(trades: list[dict], week_start: datetime, week_end: date
     best_hours = select_best_hours(by_hour)
     for hour in best_hours:
         bucket = by_hour[hour]
-        session = session_for_hour(hour)
+        session = session_for_time(hour, 0)  # cosmetic label: session at the start of this clock hour
         lines.append(format_hour_row(hour, session, bucket["win"], bucket["loss"]))
     if best_hours:
         hour_entries = [(h, by_hour[h]) for h in best_hours]
