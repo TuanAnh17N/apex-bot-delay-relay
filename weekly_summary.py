@@ -24,10 +24,10 @@ _ENTRY_RE = re.compile(
     r"^[🟢🔴]\s*\*\*(LONG|SHORT)\s+#(\d+)\*\*.*?\|\s*Grade:\s*\*\*([^*]+)\*\*\s*\|\s*Entry:\s*([\d.]+)"
 )
 _TARGET_HIT_RE = re.compile(
-    r"^🎯\s*\*\*TARGET HIT\s+#(\d+)\*\*.*?\|\s*(LONG|SHORT)\s+from\s+([\d.]+)"
+    r"^🎯\s*\*\*TARGET HIT\s+#(\d+)\*\*.*?\|\s*(LONG|SHORT)\s+from\s+([\d.]+)\s*\|\s*([+-]?[\d.]+)R"
 )
 _STOP_HIT_RE = re.compile(
-    r"^🛑\s*\*\*STOP HIT\s+#(\d+)\*\*.*?\|\s*(LONG|SHORT)\s+from\s+([\d.]+)"
+    r"^🛑\s*\*\*STOP HIT\s+#(\d+)\*\*.*?\|\s*(LONG|SHORT)\s+from\s+([\d.]+)\s*\|\s*([+-]?[\d.]+)R"
 )
 _BE_HIT_RE = re.compile(
     r"^⚡\s*\*\*BE HIT\s+#(\d+)\*\*.*?\|\s*(LONG|SHORT)\s+from\s+([\d.]+)"
@@ -48,16 +48,27 @@ def parse_entry(content: str) -> dict | None:
 
 
 def parse_resolution(content: str) -> dict | None:
-    for outcome, pattern in (("win", _TARGET_HIT_RE), ("loss", _STOP_HIT_RE), ("be", _BE_HIT_RE)):
+    for outcome, pattern in (("win", _TARGET_HIT_RE), ("loss", _STOP_HIT_RE)):
         match = pattern.match(content)
         if match:
-            number, direction, entry_price = match.groups()
+            number, direction, entry_price, r_value = match.groups()
             return {
                 "outcome": outcome,
                 "direction": direction,
                 "number": number,
                 "entry_price": float(entry_price),
+                "r_value": float(r_value),
             }
+    match = _BE_HIT_RE.match(content)
+    if match:
+        number, direction, entry_price = match.groups()
+        return {
+            "outcome": "be",
+            "direction": direction,
+            "number": number,
+            "entry_price": float(entry_price),
+            "r_value": 0.0,
+        }
     return None
 
 
@@ -84,6 +95,7 @@ def reconstruct_trades(messages: list[dict], timeframe: str) -> list[dict]:
             "outcome": resolution["outcome"],
             "entry_time": opened["entry_time"],
             "grade": opened["grade"],
+            "r_value": resolution["r_value"],
         })
     return trades
 
@@ -132,8 +144,9 @@ def tally(trades: list[dict], key_fn) -> dict:
     result: dict = {}
     for t in trades:
         k = key_fn(t)
-        bucket = result.setdefault(k, {"win": 0, "loss": 0, "be": 0})
+        bucket = result.setdefault(k, {"win": 0, "loss": 0, "be": 0, "r_sum": 0.0})
         bucket[t["outcome"]] += 1
+        bucket["r_sum"] += t["r_value"]
     return result
 
 
@@ -145,8 +158,18 @@ def format_pct(wins: int, losses: int) -> str:
     return f"{pct}%"
 
 
-def format_net(wins: int, losses: int) -> str:
-    return f"{wins - losses:+d}R"
+def format_net(r_sum: float) -> str:
+    rounded = round(r_sum, 1)
+    if rounded == int(rounded):
+        return f"{int(rounded):+d}R"
+    return f"{rounded:+.1f}R"
+
+
+def format_r_fixed(r_sum: float) -> str:
+    """Always one decimal place, signed -- used only for the headline Wins/
+    Losses lines, which (per the user's own historical reports) never trim
+    a trailing .0 the way format_net/format_pct do."""
+    return f"{r_sum:+.1f}R"
 
 
 def win_rate(bucket: dict) -> float:
@@ -158,8 +181,8 @@ def trade_count(bucket: dict) -> int:
     return bucket["win"] + bucket["loss"] + bucket["be"]
 
 
-def net(bucket: dict) -> int:
-    return bucket["win"] - bucket["loss"]
+def net(bucket: dict) -> float:
+    return bucket["r_sum"]
 
 
 def pick_best(entries: list[tuple], tie_break_order: list | None = None):
@@ -176,12 +199,12 @@ def pick_best(entries: list[tuple], tie_break_order: list | None = None):
 from datetime import timedelta
 
 
-def format_row(label: str, wins: int, losses: int, label_width: int = 12) -> str:
-    return f"{label:<{label_width}}{wins:>2}W {losses:>2}L   WR:{format_pct(wins, losses):>7}   Net: {format_net(wins, losses)}"
+def format_row(label: str, wins: int, losses: int, r_sum: float, label_width: int = 12) -> str:
+    return f"{label:<{label_width}}{wins:>2}W {losses:>2}L   WR:{format_pct(wins, losses):>7}   Net: {format_net(r_sum)}"
 
 
-def format_hour_row(hour: int, session: str, wins: int, losses: int) -> str:
-    return f"{hour:02d}:00  {session:<12}{wins:>2}W {losses:>2}L   WR:{format_pct(wins, losses):>7}   Net: {format_net(wins, losses)}"
+def format_hour_row(hour: int, session: str, wins: int, losses: int, r_sum: float) -> str:
+    return f"{hour:02d}:00  {session:<12}{wins:>2}W {losses:>2}L   WR:{format_pct(wins, losses):>7}   Net: {format_net(r_sum)}"
 
 
 def select_best_hours(by_hour: dict) -> list[int]:
@@ -209,6 +232,8 @@ def build_weekly_report(trades: list[dict], week_start: datetime, week_end: date
     losses = sum(1 for t in trades if t["outcome"] == "loss")
     bes = sum(1 for t in trades if t["outcome"] == "be")
     total = wins + losses + bes
+    win_r_sum = sum(t["r_value"] for t in trades if t["outcome"] == "win")
+    loss_r_sum = sum(t["r_value"] for t in trades if t["outcome"] == "loss")
 
     for t in trades:
         t["_local_entry"] = to_local(t["entry_time"])
@@ -218,11 +243,11 @@ def build_weekly_report(trades: list[dict], week_start: datetime, week_end: date
         "🕐 All times shown in CET/CEST",
         "",
         f"⏱️ {total} trades",
-        f"✅ Wins    {wins}   +{wins}.0R",
-        f"❌ Losses  {losses}   -{losses}.0R",
+        f"✅ Wins    {wins}   {format_r_fixed(win_r_sum)}",
+        f"❌ Losses  {losses}   {format_r_fixed(loss_r_sum)}",
         f"⚡️ BE       {bes}",
         "─────────────────────",
-        f"📈 Net        {format_net(wins, losses)}",
+        f"📈 Net        {format_net(win_r_sum + loss_r_sum)}",
         f"🎯 Win Rate   {format_pct(wins, losses)}",
         "",
         "",
@@ -235,7 +260,7 @@ def build_weekly_report(trades: list[dict], week_start: datetime, week_end: date
         if name in by_session and (by_session[name]["win"] + by_session[name]["loss"]) > 0
     ]
     for name, bucket in session_entries:
-        lines.append(format_row(name, bucket["win"], bucket["loss"]))
+        lines.append(format_row(name, bucket["win"], bucket["loss"], bucket["r_sum"]))
     if session_entries:
         best = pick_best(session_entries, tie_break_order=session_names)
         lines.append("")
@@ -248,7 +273,7 @@ def build_weekly_report(trades: list[dict], week_start: datetime, week_end: date
     for hour in best_hours:
         bucket = by_hour[hour]
         session = session_for_time(hour, 0)  # cosmetic label: session at the start of this clock hour
-        lines.append(format_hour_row(hour, session, bucket["win"], bucket["loss"]))
+        lines.append(format_hour_row(hour, session, bucket["win"], bucket["loss"], bucket["r_sum"]))
     if best_hours:
         hour_entries = [(h, by_hour[h]) for h in best_hours]
         peak = pick_best(hour_entries)
@@ -263,7 +288,7 @@ def build_weekly_report(trades: list[dict], week_start: datetime, week_end: date
         if (by_grade[g]["win"] + by_grade[g]["loss"]) > 0
     ]
     for grade, bucket in grade_entries:
-        lines.append(format_row(grade, bucket["win"], bucket["loss"], label_width=6))
+        lines.append(format_row(grade, bucket["win"], bucket["loss"], bucket["r_sum"], label_width=6))
     if grade_entries:
         best_grade = pick_best(grade_entries, tie_break_order=[g for g, _ in grade_entries])
         lines.append("")
@@ -277,7 +302,7 @@ def build_weekly_report(trades: list[dict], week_start: datetime, week_end: date
         if tf in by_tf and (by_tf[tf]["win"] + by_tf[tf]["loss"]) > 0
     ]
     for tf, bucket in tf_entries:
-        lines.append(format_row(tf, bucket["win"], bucket["loss"], label_width=6))
+        lines.append(format_row(tf, bucket["win"], bucket["loss"], bucket["r_sum"], label_width=6))
 
     return "\n".join(lines)
 
