@@ -215,7 +215,7 @@ def build_weekly_report(trades: list[dict], week_start: datetime, week_end: date
 
     lines = [
         f"📈 Weekly Performance Stats — {week_start:%b %d} — {week_end:%b %d, %Y}",
-        "🕐 All times shown in German local time (CET/CEST)",
+        "🕐 All times shown in CET/CEST",
         "",
         f"⏱️ {total} trades",
         f"✅ Wins    {wins}   +{wins}.0R",
